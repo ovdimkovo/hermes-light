@@ -1,0 +1,195 @@
+name: Build Hermes Light
+
+# Builds the remote-only desktop client (variant "light": no Python, no local agent)
+# from the official NousResearch/hermes-agent and publishes it to this repo's Releases.
+# Unsigned. No secrets. Nothing from upstream is stored in this repo.
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version X.Y.Z. Empty = newest stable tag of upstream'
+        required: false
+        default: ''
+      force:
+        description: 'Rebuild and overwrite the release even if it exists'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-light
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: NousResearch/hermes-agent
+
+jobs:
+  resolve:
+    name: resolve version
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      build: ${{ steps.v.outputs.build }}
+    steps:
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          FORCE: ${{ github.event.inputs.force }}
+        run: |
+          set -euo pipefail
+          version="$INPUT_VERSION"
+          if [ -z "$version" ]; then
+            # Stable tags only: vX.Y.Z. Skips canary tags and old CalVer tags (v2026.M.D).
+            version=$(git ls-remote --tags --refs "https://github.com/$UPSTREAM" 'refs/tags/v*' \
+              | awk '{print $2}' | sed 's#refs/tags/##' \
+              | grep -E '^v[0-9]{1,3}\.[0-9]+\.[0-9]+$' | sort -V | tail -1 | sed 's/^v//')
+          fi
+          echo "$version" | grep -Eq '^[0-9]{1,3}\.[0-9]+\.[0-9]+$' || { echo "bad version: '$version'"; exit 1; }
+          git ls-remote --exit-code --tags "https://github.com/$UPSTREAM" "refs/tags/v$version" >/dev/null \
+            || { echo "upstream has no tag v$version"; exit 1; }
+          build=true
+          if gh release view "v$version" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            if [ "$FORCE" = "true" ]; then
+              echo "Release v$version exists; force is set."
+            else
+              echo "Release v$version exists; nothing to do."
+              build=false
+            fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "Version $version, build=$build"
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # 22.04 keeps the AppImage runnable on older glibc.
+          - { name: linux-x64, os: ubuntu-22.04, args: '' }
+          # Upstream builds each architecture on its own host: no cross-building.
+          - { name: macos-arm64, os: macos-26, args: '' }
+          - { name: macos-x64, os: macos-26-intel, args: '' }
+          # Unpacked app folder, zipped below: no MSIX, no certificate.
+          - { name: windows-x64, os: windows-latest, args: '-- --dir' }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: v${{ env.VERSION }}
+          path: upstream
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Patch version and names
+        shell: bash
+        working-directory: upstream
+        run: |
+          set -euo pipefail
+          # Upstream keeps 0.0.0 in pyproject.toml; the real version comes from the tag.
+          python - "$VERSION" <<'PY'
+          import re, sys
+          def edit(path, fn):
+              t = open(path, encoding='utf-8').read()
+              t = fn(t)
+              open(path, 'w', encoding='utf-8', newline='').write(t)
+          def version(t):
+              t, n = re.subn(r'(?m)^version = "[^"]*"', f'version = "{sys.argv[1]}"', t, count=1)
+              assert n == 1, 'version line not found'
+              return t
+          def config(t):
+              old = 'applicationId: appNamePascal,'
+              assert old in t, 'msix applicationId not found'
+              # MSIX Application.Id cannot contain a hyphen.
+              return t.replace(old, "applicationId: 'HermesLight',", 1)
+          def identity(t):
+              t, n = re.subn(r"const buildCommit = [^\n]*", "const buildCommit = null", t, count=1)
+              assert n == 1, 'buildCommit line not found'
+              old = "display: 'Hermes Light',\n    kebab: 'hermes-light',\n    pascal: 'HermesLight'"
+              assert old in t, 'light variant names not found'
+              return t.replace(old, "display: 'hermes-light',\n    kebab: 'hermes-light',\n    pascal: 'hermes-light'", 1)
+          edit('pyproject.toml', version)
+          edit('apps/desktop/electron-builder.config.cjs', config)
+          edit('apps/desktop/product-identity.cjs', identity)
+          PY
+          # The build driver needs a clean tree.
+          git -c user.name=ci -c user.email=ci@example.invalid commit -qam "build: version $VERSION, hermes-light names"
+      - name: Build light variant
+        shell: bash
+        working-directory: upstream
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          PYTHONUTF8: '1'
+          BUILDER_ARGS: ${{ matrix.args }}
+        run: python scripts/bundles/desktop.py --commit "$(git rev-parse HEAD)" --variant light --clean $BUILDER_ARGS
+      - name: List output
+        shell: bash
+        run: ls -lh upstream/apps/desktop/release
+      - name: Zip the portable Windows build
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Get-ChildItem upstream/apps/desktop/release -Directory -Filter 'win*unpacked' | Select-Object -First 1
+          if (-not $dir) { throw 'no win-unpacked folder in the build output' }
+          if (-not (Test-Path (Join-Path $dir.FullName 'hermes-light.exe'))) { throw 'hermes-light.exe not found' }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path (Join-Path $dir.FullName '*') -DestinationPath "dist/hermes-light-$env:VERSION-win-x64-portable.zip" -CompressionLevel Optimal
+          Get-ChildItem dist | Format-Table Name, Length
+      - name: Collect files
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir dist
+          cp upstream/apps/desktop/release/*.AppImage upstream/apps/desktop/release/*.dmg upstream/apps/desktop/release/*.zip dist/ 2>/dev/null || true
+          ls -lh dist
+          [ -n "$(ls -A dist)" ] || { echo "no files to publish"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hermes-light-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: [resolve, build]
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: hermes-light-*
+          merge-multiple: true
+      - name: Publish
+        run: |
+          set -euo pipefail
+          ls -lh dist
+          for ext in AppImage dmg zip; do
+            ls dist/*."$ext" >/dev/null 2>&1 || { echo "missing .$ext"; exit 1; }
+          done
+          if gh release view "v$VERSION" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "v$VERSION" dist/* --clobber -R "$GITHUB_REPOSITORY"
+          else
+            gh release create "v$VERSION" dist/* -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title "hermes-light $VERSION" \
+              --notes "Unsigned remote-only desktop client built from NousResearch/hermes-agent v$VERSION (variant light). Connect it to a remote Hermes backend."
+          fi
