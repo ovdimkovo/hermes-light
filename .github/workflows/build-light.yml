@@ -78,7 +78,7 @@ jobs:
         include:
           # 22.04 keeps the AppImage runnable on older glibc.
           - { name: linux-x64, os: ubuntu-22.04, args: '' }
-          - { name: macos-arm64, os: macos-26, args: '' }
+          - { name: macos-arm64, os: macos-15, args: '' }
           # Unpacked app folder, zipped below: no MSIX, no certificate.
           - { name: windows-x64, os: windows-latest, args: '-- --dir' }
     runs-on: ${{ matrix.os }}
