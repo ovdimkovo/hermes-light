@@ -17,8 +17,6 @@ on:
         description: 'Rebuild and overwrite the release even if it exists'
         type: boolean
         default: false
-  push:
-    branches: [build-workflow]
 
 permissions:
   contents: write
