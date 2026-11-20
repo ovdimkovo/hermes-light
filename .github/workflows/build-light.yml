@@ -78,7 +78,8 @@ jobs:
         include:
           # 22.04 keeps the AppImage runnable on older glibc.
           - { name: linux-x64, os: ubuntu-22.04, args: '' }
-          - { name: macos-arm64, os: macos-26, args: '' }
+          # arm64 is cross-built on an Intel runner: native arm64 runners often get no capacity.
+          - { name: macos-arm64, os: macos-26-intel, args: '-- --arm64' }
           - { name: macos-x64, os: macos-26-intel, args: '' }
           # Unpacked app folder, zipped below: no MSIX, no certificate.
           - { name: windows-x64, os: windows-latest, args: '-- --dir' }
