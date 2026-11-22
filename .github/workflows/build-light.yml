@@ -7,6 +7,8 @@ name: Build Hermes Light
 on:
   schedule:
     - cron: '17 3 * * *'
+  push:
+    branches: [fix-aumid]
   workflow_dispatch:
     inputs:
       version:
@@ -40,7 +42,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           INPUT_VERSION: ${{ github.event.inputs.version }}
-          FORCE: ${{ github.event.inputs.force }}
+          FORCE: ${{ github.event.inputs.force || github.event_name == 'push' }}
         run: |
           set -euo pipefail
           version="$INPUT_VERSION"
@@ -122,7 +124,13 @@ jobs:
               old = "display: 'Hermes Light',\n    kebab: 'hermes-light',\n    pascal: 'HermesLight'"
               assert old in t, 'light variant names not found'
               return t.replace(old, "display: 'hermes-light',\n    kebab: 'hermes-light',\n    pascal: 'hermes-light'", 1)
+          def main_ts(t):
+              old = "IDENTITY_APP_NAME ? PRODUCT_IDENTITY.appId : 'com.nousresearch.hermes'"
+              assert old in t, 'AppUserModelID line not found'
+              # Own AppUserModelID (com.nousresearch.hermes-light): taskbar pins must not map to Hermes.exe.
+              return t.replace(old, "PRODUCT_IDENTITY.appId", 1)
           edit('pyproject.toml', version)
+          edit('apps/desktop/electron/main.ts', main_ts)
           edit('apps/desktop/electron-builder.config.cjs', config)
           edit('apps/desktop/product-identity.cjs', identity)
           PY
