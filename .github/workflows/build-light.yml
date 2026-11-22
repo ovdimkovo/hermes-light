@@ -7,8 +7,6 @@ name: Build Hermes Light
 on:
   schedule:
     - cron: '17 3 * * *'
-  push:
-    branches: [fix-aumid]
   workflow_dispatch:
     inputs:
       version:
@@ -42,7 +40,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           INPUT_VERSION: ${{ github.event.inputs.version }}
-          FORCE: ${{ github.event.inputs.force || github.event_name == 'push' }}
+          FORCE: ${{ github.event.inputs.force }}
         run: |
           set -euo pipefail
           version="$INPUT_VERSION"
